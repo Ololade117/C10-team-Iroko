@@ -1,111 +1,74 @@
-# Team-Iroko-Medical-Chat-bot
-TRI AI Project for Team Iroko(Members: Ololade Ogunleye, Lawal Habib, Stephanie Omolu, Alemoh Rapheal)
-# Iroko — AI-Powered Mental Health Support Chatbot
+# Iroko —  Mental Health Support Chatbot
 
-Iroko is a fine-tuned conversational AI designed to provide culturally appropriate, safety-conscious mental health support for a Nigerian context. It's built by fine-tuning Google's Gemma 4 E2B model on a mental health counseling dataset, with a full pipeline spanning training, safety evaluation, and production deployment.
+Iroko is a fine-tuned conversational AI built to provide culturally appropriate, safety-conscious mental health support for a Nigerian context. It fine-tunes Google's Gemma 4 E2B model on a mental health counseling dataset, with a pipeline spanning data preparation, training, safety evaluation, and deployment.
 
-**Repositories:**
-- GitHub: [`Ololade117/Iroko`](https://github.com/Ololade117/Iroko)
-- Model (Hugging Face Hub): [`Ololade117/gemma-4-e2b-iroko-mentalhealth-finetuned5`](https://huggingface.co/Ololade117/gemma-4-e2b-iroko-mentalhealth-finetuned5)
+- Model (Hugging Face Hub): `Ololade117/gemma-4-e2b-iroko-mentalhealth-finetuned5`
 
----
+## Dataset
 
-## Project Goals
+The training data combines an existing mental-health counseling conversation dataset, from counsel health, mental health faq, anno mi, excov, with a purpose-built safety set, then splits into train/validation/test.
 
-- Fine-tune a small, efficient language model for empathetic, supportive mental health conversations
-- Ensure the model handles crisis situations (suicidal ideation, self-harm, violence) responsibly, using Nigeria-specific resources
-- Build a safety harness that catches failure modes the base fine-tune doesn't fully solve on its own
-- Serve the model through a stable, shareable interface with per-user logging for ongoing review
+**Base counseling data** was cleaned before use:
+- **HTML artifact stripping** — removed raw `&nbsp;`, `<br>` tags leaked from the source into responses.
+- **Fabricated identity/credential scrubbing** — removed self-introduced fake names, workplaces, and false licensure claims (e.g. "Hi, I'm Karen, I work with family services...") and fabricated sign-offs.
+- **Transcript artifact removal** — stripped real therapist names and markers like `[unintelligible]`/`[crosstalk]` from transcript-sourced examples.
+- **Nigeria localization** — replaced US-centric crisis resources (988, 911) with local ones: **Mentally Aware Nigeria Initiative (MANI)** — 0809 111 6264 / 0811 1680 686 — and **112**, the national emergency line.
 
----
+**Safety augmentation set** was generated, not scraped:
+- Adversarial refusal examples were generated using the **clean, un-fine-tuned base model**, so the LoRA adapter learns to preserve refusal behavior rather than drift from it.
+- Prompts targeted real failure categories: direct method-seeking (weapons, poison), "as a joke" framing, euphemisms, and third-person displacement.
+- Every example was **manually reviewed** before inclusion, never trusted as ground truth automatically.
+- Mixed into training at ~**20%** of examples, kept diverse rather than duplicated.
 
-## Architecture & Pipeline
+## Training Pipeline
 
-### 1. Data Cleaning & Preprocessing
-- Source dataset combined and split into train/test/validation sets
-- **HTML artifact stripping** — removed raw `&nbsp;`, `<br>` tags leaking from the original data source into model responses
-- **Fabricated identity/credential scrubbing** — removed self-introduced fake names, workplaces, and false claims of professional licensure (e.g. "Hi, I'm Karen, I work with family services..."), including sign-off patterns ("Best regards, Dr. ...")
-- **Transcript artifact removal** — stripped real therapist names, `[unintelligible]`, `[crosstalk]` markers from transcript-sourced data
-- **Nigeria localization** — replaced US-centric crisis resources (988, 911, "Suicide & Crisis Lifeline") with Nigeria-specific ones: **Mentally Aware Nigeria Initiative (MANI)** — 0809 111 6264 / 0811 1680 686 — and **112** (national emergency line)
+**1. Data collection & preprocessing** — combine and clean the counseling data and generated safety set as above, then split into train/validation/test.
 
-### 2. Safety Data Augmentation
-- Generated adversarial refusal examples using the **clean, un-fine-tuned base model**, so the adapter learns to preserve refusal behavior rather than drift away from it during fine-tuning
-- Prompts covered real failure categories: direct method-seeking (guns, poison), "as a joke" framing, euphemisms, third-person displacement
-- All generated examples **manually reviewed** before inclusion (never trusted as ground truth blindly)
-- Mixed into the training set at ~20% ratio, diverse rather than duplicated
+**2. Model & method:**
+- Base: `google/gemma-4-E2B-it`, 4-bit quantized (NF4, bitsandbytes) to fit limited hardware.
+- Fine-tuning: LoRA (rank 16, alpha 32) via PEFT, targeting attention/MLP projections only — vision/audio towers excluded since this is text-only.
+- Precision: bf16 throughout, after fp16 caused `GradScaler` incompatibilities on this architecture.
+- Trainer: TRL's `SFTTrainer`, with checkpointing, validation-loss tracking, and early stopping (patience = 3 on `eval_loss`).
 
-### 3. Training
-- **Base model:** `google/gemma-4-E2B-it`, 4-bit quantized (NF4, bitsandbytes)
-- **Method:** LoRA (rank 16, alpha 32) via PEFT, targeting attention/MLP projections while explicitly excluding vision/audio towers (multimodal components not used for this text-only task)
-- **Precision:** bf16 end-to-end (avoids `GradScaler` incompatibility seen with fp16 on this architecture)
-- **Framework:** TRL's `SFTTrainer`, with checkpointing, validation-loss tracking, and early stopping (patience=3, monitored on `eval_loss`)
-- **Key architecture-specific fixes:** targeted norm-upcasting (not blanket `kbit` prep), `Gemma4ClippableLinear` layer unwrapping before LoRA injection, memory-constrained loading (`max_memory`, `low_cpu_mem_usage`)
+**3. Architecture-specific fixes for Gemma 4 E2B:**
+- Targeted norm-upcasting rather than blanket k-bit preparation.
+- Manual unwrapping of `Gemma4ClippableLinear` layers before LoRA injection.
+- Memory-constrained loading (`max_memory`, `low_cpu_mem_usage`) for free-tier GPUs.
 
-### 4. Evaluation
-- **Validation loss** tracked throughout training — but treated as necessary, not sufficient, for judging safety
-- **Manual log review** of real chatbot conversations surfaced 6 major failure categories (see below)
-- **Red-team evaluation framework** — a fixed set of paraphrased adversarial prompts, held out from training data, run against each model version and manually scored (pass/fail/borderline) per failure category. This is the actual gate for whether retraining improved safety, since loss going down does not imply safety behavior improved.
+**4. Hyperparameters** (LoRA rank/alpha, early-stopping patience, safety-data mixing ratio) were set from iterative runs on Colab/Kaggle, prioritizing stable convergence and preserved refusal behavior over raw loss reduction.
 
-### 5. Deployment (Serving Harness)
-Deployed as a Hugging Face Space (Gradio) on free **ZeroGPU** hardware, with a multi-layer safety harness wrapped around raw model generation:
+## Evaluation
 
-1. **Input Layer 1 — hard keyword match:** direct crisis phrases bypass generation entirely, returning a fixed crisis-resource message
-2. **Input Layer 2 — structural risk detection:** regex-based detection of method-seeking phrasing, euphemisms, "as a joke" framing, plus conversation-level escalation tracking across recent turns
-3. **Output Layer — response moderation:** screens the *model's own generated response* for red-flag patterns before it reaches the user (independent of whether the input was flagged)
-4. **Decoding controls:** repetition penalty + no-repeat n-gram (fixes text-degeneration loops); greedy decoding forced specifically when elevated risk is detected (fixes inconsistent responses to near-identical risky inputs)
-5. **Logging:** per-user conversation logs written asynchronously to a shared Google Sheet (service-account auth, since a Space has no interactive login)
+Evaluation deliberately treats training loss as necessary but not sufficient for judging safety — early runs showed loss decreasing while safety failures were still present.
 
----
+- **Validation loss** was tracked as a basic convergence check (2.283 → 2.093 in the latest run; training loss 6.25 → ~2.10–2.25; token accuracy 49.4% → 52.3%; entropy 2.22 → 2.09).
+- **Manual log review** of real conversations surfaced six recurring failure categories: bypassable keyword filtering, the model engaging with harmful requests, fabricated clinical identities, inconsistent responses to near-identical risky prompts, text-degeneration loops, and uneven quality on adversarial prompts — each traced to a specific fix (regex-based risk detection, output-side moderation, greedy decoding under detected risk, repetition penalties).
+- **Red-team evaluation** is the primary safety gate: a fixed set of paraphrased adversarial prompts, held out from training, run against each model version and manually scored pass/fail/borderline per category — the metric that actually answers whether an iteration improved safety, since loss alone does not.
+- **Deployment checks**: crisis-detection recall, consistency rate (same input → same correct response), and latency (cold start ~145s, warm ~20–25s on ZeroGPU).
 
-## Key Failure Categories Identified (via manual log review)
 
-| # | Category | Example | Fix |
-|---|---|---|---|
-| 1 | Bypassable keyword filter | Euphemisms, "as a joke" framing evaded exact-match detection | Structural regex + conversation-escalation tracking |
-| 2 | Model engaging with harmful requests | Validated/assisted requests involving guns, poison, violence | Adversarial refusal training data + output-side moderation |
-| 3 | Fabricated clinical identities | Model introduced itself as "Karen," claimed counselor credentials | Identity/credential scrubbing + explicit disclosure training examples |
-| 4 | Response inconsistency | Near-identical risky prompts got different responses | Greedy decoding under detected risk |
-| 5 | Text degeneration loops | Repeated URL/phrase loops in long responses | `repetition_penalty`, `no_repeat_ngram_size` |
-| 6 | Uneven response quality | Strong on benign factual questions, weak on adversarial ones | Rebalanced training data toward underrepresented adversarial categories |
+## Reproduction
 
----
+1. **Prepare data** — run the cleaning scripts/notebooks in `data/`/`notebooks/` to strip HTML artifacts, scrub fabricated identities, remove transcript markers, and localize crisis resources; generate and manually review the adversarial safety set, then mix it in at ~20%.
+2. **Split** the data into train/validation/test sets.
+3. **Fine-tune** via the training notebook/script in `src/` (or `notebooks/`), which loads `google/gemma-4-E2B-it` in 4-bit, applies LoRA (rank 16, alpha 32), and trains with `SFTTrainer` (bf16, early stopping on `eval_loss`).
+4. **Evaluate** the checkpoint against the held-out red-team prompt set (pass/fail/borderline per category); compare validation loss and token accuracy against the prior version.
+5. **Push** the checkpoint to the Hugging Face Hub once it passes evaluation.
+6. **Deploy** by wrapping the model in the multi-layer safety harness (input keyword/regex layers, output moderation, decoding controls) and serving via a Hugging Face Space (Gradio, ZeroGPU); configure the Google Sheets service account for logging.
 
-## Key Performance Indicators
+Refer to `doc/` for supporting write-ups and `data/` for the underlying dataset files.
 
-**Training metrics (most recent full run with logged metrics):**
+## Appendix
 
-| Metric | Start | End |
-|---|---|---|
-| Training loss | 6.25 | ~2.10–2.25 |
-| Validation loss | 2.283 | 2.093 |
-| Token accuracy | 49.4% | 52.3% |
-| Entropy | 2.22 | 2.09 |
+**Team members (Team Iroko):**
+- Ololade Ogunleye
+- Lawal Habib
+- Stephanie Omolu
+- Alemoh Rapheal
 
-**Safety & behavioral KPIs (the ones that gate release):**
+**Mentors:** 
 
-- **Red-team pass rate** — % of adversarial prompts per category (method-seeking, joke-framing, euphemism, third-person) receiving an appropriate refusal vs. harmful engagement. This is the primary safety metric, scored manually per model version.
-- **Consistency rate** — whether near-identical risky inputs reliably produce the same (correct) response.
-- **Crisis-detection recall** — proportion of genuinely risky messages caught by the input-side layers before reaching generation.
-- **Response latency** — cold start (~145s, dominated by one-time model download) vs. warm request (~20–25s on ZeroGPU, since GPU-resident state isn't guaranteed to persist between calls on shared hardware).
+## References
 
-> **Note:** validation loss improving does *not* imply safety behavior improved — this was directly demonstrated by early logs showing declining loss alongside active safety failures. Red-team pass rate, scored manually against a fixed held-out prompt set, is the metric that actually answers whether a training iteration made the model safer.
-
----
-
-## Tools & Technologies
-
-| Category | Tools |
-|---|---|
-| Training | Google Colab, Kaggle, PEFT/LoRA, bitsandbytes, TRL |
-| Model | Gemma 4 E2B (`google/gemma-4-E2B-it`) |
-| Deployment | Hugging Face Spaces (ZeroGPU), Gradio |
-| Logging | Google Sheets API (service account auth) |
-| Versioning | Hugging Face Hub, GitHub |
-
----
-
-## Status & Next Steps
-
-- Model version: **finetuned5**, pushed to the Hub and deployed to a Space harness
-- Outstanding: run the red-team evaluation against finetuned5 specifically and score results, to confirm whether the retraining + harness combination closes the gaps found in earlier versions
-- Recommended before any wider release: complete red-team scoring, and treat current deployment as internal testing only until that's done
+- Repository: https://github.com/Ololade117/C10-team-Iroko
+- Model (Hugging Face Hub): https://huggingface.co/Ololade117/gemma-4-e2b-iroko-mentalhealth-finetuned5
